@@ -17,6 +17,7 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use alloc::{vec, vec::Vec};
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -45,6 +46,7 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    syscall_counts: Vec<[usize; 512]>,
 }
 
 lazy_static! {
@@ -65,6 +67,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_counts: vec![[0; 512]; num_app],
                 })
             },
         }
@@ -135,6 +138,21 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+}
+
+/// Record a syscall before dispatch, including trace itself.
+pub fn record_syscall(id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    if let Some(count) = inner.syscall_counts[current].get_mut(id) {
+        *count += 1;
+    }
+}
+
+/// Read the calling task's syscall counter.
+pub fn syscall_count(id: usize) -> Option<usize> {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    inner.syscall_counts[inner.current_task].get(id).copied()
 }
 
 /// Run the first task in task list.

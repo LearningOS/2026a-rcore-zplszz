@@ -253,6 +253,103 @@ impl MemorySet {
         }
         memory_set
     }
+    /// Map an anonymous, page-aligned user range without replacing existing pages.
+    pub fn mmap(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        if start % PAGE_SIZE != 0 || prot == 0 || prot & !7 != 0 {
+            return -1;
+        }
+        let end = match start
+            .checked_add(len)
+            .and_then(|n| n.checked_add(PAGE_SIZE - 1))
+        {
+            Some(n) if n < (1usize << 38) => n / PAGE_SIZE * PAGE_SIZE,
+            _ => return -1,
+        };
+        if len == 0 {
+            return 0;
+        }
+        let range = VPNRange::new(VirtAddr::from(start).floor(), VirtAddr::from(end).floor());
+        if range
+            .into_iter()
+            .any(|vpn| self.translate(vpn).map_or(false, |pte| pte.is_valid()))
+        {
+            return -1;
+        }
+        let permission = MapPermission::from_bits((prot as u8) << 1).unwrap() | MapPermission::U;
+        let mut area = MapArea::new(start.into(), end.into(), MapType::Framed, permission);
+        // Allocate before publishing any leaf entries, so exhaustion leaves no partial mapping.
+        for vpn in range {
+            match frame_alloc() {
+                Some(frame) => {
+                    area.data_frames.insert(vpn, frame);
+                }
+                None => return -1,
+            }
+        }
+        let flags = PTEFlags::from_bits(permission.bits).unwrap();
+        for (&vpn, frame) in &area.data_frames {
+            self.page_table.map(vpn, frame.ppn, flags);
+        }
+        self.areas.push(area);
+        0
+    }
+
+    /// Unmap user pages, splitting owned areas when only part of an area is removed.
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        if start % PAGE_SIZE != 0 {
+            return -1;
+        }
+        let end = match start
+            .checked_add(len)
+            .and_then(|n| n.checked_add(PAGE_SIZE - 1))
+        {
+            Some(n) if n < (1usize << 38) => n / PAGE_SIZE * PAGE_SIZE,
+            _ => return -1,
+        };
+        if len == 0 {
+            return 0;
+        }
+        let first = VirtAddr::from(start).floor();
+        let last = VirtAddr::from(end).floor();
+        let range = VPNRange::new(first, last);
+        if range.into_iter().any(|vpn| {
+            self.translate(vpn).map_or(true, |pte| {
+                !pte.is_valid() || !pte.flags().contains(PTEFlags::U)
+            })
+        }) {
+            return -1;
+        }
+        for vpn in range {
+            self.page_table.unmap(vpn);
+        }
+        let mut kept = Vec::new();
+        for mut area in self.areas.drain(..) {
+            let lo = area.vpn_range.get_start();
+            let hi = area.vpn_range.get_end();
+            if hi <= first || lo >= last {
+                kept.push(area);
+                continue;
+            }
+            let right_frames = area.data_frames.split_off(&last);
+            let removed_frames = area.data_frames.split_off(&first);
+            drop(removed_frames);
+            if last < hi {
+                kept.push(MapArea {
+                    vpn_range: VPNRange::new(last, hi),
+                    data_frames: right_frames,
+                    map_type: area.map_type,
+                    map_perm: area.map_perm,
+                });
+            }
+            if lo < first {
+                area.vpn_range = VPNRange::new(lo, first);
+                kept.push(area);
+            }
+        }
+        self.areas = kept;
+        0
+    }
+
     /// Change page table by writing satp CSR Register.
     pub fn activate(&self) {
         let satp = self.page_table.token();

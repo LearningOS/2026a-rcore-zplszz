@@ -17,7 +17,7 @@ mod task;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -46,6 +46,7 @@ struct TaskManagerInner {
     tasks: Vec<TaskControlBlock>,
     /// id of current `Running` task
     current_task: usize,
+    syscall_counts: Vec<[usize; 512]>,
 }
 
 lazy_static! {
@@ -64,6 +65,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_counts: vec![[0; 512]; num_app],
                 })
             },
         }
@@ -153,6 +155,28 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+}
+
+/// Access the current task without exposing the task manager borrow.
+pub fn with_current_task<R>(f: impl FnOnce(&mut TaskControlBlock) -> R) -> R {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    f(&mut inner.tasks[current])
+}
+
+/// Record a syscall, including the currently executing trace call.
+pub fn record_syscall(id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    if let Some(count) = inner.syscall_counts[current].get_mut(id) {
+        *count += 1;
+    }
+}
+
+/// Query a counter belonging to the current task.
+pub fn syscall_count(id: usize) -> Option<usize> {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    inner.syscall_counts[inner.current_task].get(id).copied()
 }
 
 /// Run the first task in task list.

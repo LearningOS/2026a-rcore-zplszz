@@ -156,6 +156,32 @@ impl PageTable {
     }
 }
 
+/// Translate a user buffer only after checking every page and its permissions.
+pub fn checked_user_buffer(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    write: bool,
+) -> Option<Vec<&'static mut [u8]>> {
+    let start = ptr as usize;
+    let end = start.checked_add(len)?;
+    if end >= (1usize << 38) {
+        return None;
+    }
+    let table = PageTable::from_token(token);
+    let mut pos = start;
+    while pos < end {
+        let va = VirtAddr::from(pos);
+        let pte = table.translate(va.floor())?;
+        let permission = if write { PTEFlags::W } else { PTEFlags::R };
+        if !pte.is_valid() || !pte.flags().contains(PTEFlags::U | permission) {
+            return None;
+        }
+        pos += (4096 - va.page_offset()).min(end - pos);
+    }
+    Some(translated_byte_buffer(token, ptr, len))
+}
+
 /// Create mutable `Vec<u8>` slice in kernel space from ptr in other address space. NOTICE: the content pointed to by the pointer `ptr` can cross physical pages.
 pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);

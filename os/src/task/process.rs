@@ -7,7 +7,7 @@ use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
-use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
+use crate::sync::{Condvar, DeadlockDetector, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -49,6 +49,9 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    pub deadlock_detect_enabled: bool,
+    pub mutex_detector: DeadlockDetector,
+    pub semaphore_detector: DeadlockDetector,
 }
 
 impl ProcessControlBlockInner {
@@ -72,6 +75,8 @@ impl ProcessControlBlockInner {
     }
     /// deallocate a task id
     pub fn dealloc_tid(&mut self, tid: usize) {
+        self.mutex_detector.retire_thread(tid);
+        self.semaphore_detector.retire_thread(tid);
         self.task_res_allocator.dealloc(tid)
     }
     /// the count of tasks(threads) in this process
@@ -103,6 +108,9 @@ impl ProcessControlBlock {
                     is_zombie: false,
                     memory_set,
                     parent: None,
+                    deadlock_detect_enabled: false,
+                    mutex_detector: DeadlockDetector::default(),
+                    semaphore_detector: DeadlockDetector::default(),
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: vec![
@@ -236,6 +244,9 @@ impl ProcessControlBlock {
                     is_zombie: false,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
+                    deadlock_detect_enabled: false,
+                    mutex_detector: DeadlockDetector::default(),
+                    semaphore_detector: DeadlockDetector::default(),
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: new_fd_table,

@@ -12,6 +12,10 @@ pub trait File: Send + Sync {
     fn readable(&self) -> bool;
     /// the file writable?
     fn writable(&self) -> bool;
+    /// Metadata exists only for real filesystem inodes.
+    fn stat(&self) -> Option<Stat> {
+        None
+    }
     /// read from the file to buf, return the number of bytes read
     fn read(&self, buf: UserBuffer) -> usize;
     /// write to the file from buf, return the number of bytes written
@@ -31,7 +35,7 @@ pub struct Stat {
     /// number of hard links
     pub nlink: u32,
     /// unused pad
-    pad: [u64; 7],
+    pub(crate) pad: [u64; 7],
 }
 
 bitflags! {
@@ -47,6 +51,6 @@ bitflags! {
     }
 }
 
-pub use inode::{list_apps, open_file, OSInode, OpenFlags};
+pub use inode::{list_apps, open_file, OSInode, OpenFlags, ROOT_INODE};
 pub use pipe::{make_pipe, Pipe};
 pub use stdio::{Stdin, Stdout};
